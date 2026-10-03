@@ -10,6 +10,10 @@
 
 ## 动画演示
 
+**在线体验：<https://disdjj.github.io/mini-tala/>**（也可以通过 [Gist 预览](https://gistpreview.github.io/?6b738c2422ab87fff842f9cfb568c9e8) 打开）
+
+本地运行：
+
 ```sh
 npm install
 npm run dev      # 本地开发
