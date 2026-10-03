@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>mini-tala：TALA 布局算法动画演示</title>
+  </head>
+  <body>
+    <header>
+      <h1>mini-tala</h1>
+      <p class="subtitle">TALA 布局算法的极简复刻：<b>网格放置</b> → <b>正交路由</b> → <b>多 seed 选优</b></p>
+    </header>
+
+    <main>
+      <section class="stage">
+        <svg id="canvas" role="img" aria-label="布局动画"></svg>
+      </section>
+
+      <aside class="panel">
+        <div class="controls">
+          <label>
+            示例
+            <select id="example"></select>
+          </label>
+          <div class="buttons">
+            <button id="play" type="button">▶ 播放</button>
+            <button id="step" type="button">下一步</button>
+            <button id="reset" type="button">重置</button>
+          </div>
+          <label>
+            速度
+            <input id="speed" type="range" min="1" max="5" value="3" />
+          </label>
+        </div>
+
+        <ol id="phases" class="phases">
+          <li data-phase="place">① 节点放置：温度抖动的局部搜索</li>
+          <li data-phase="route">② 正交路由：可见性图上的 Dijkstra</li>
+          <li data-phase="select">③ 多 seed 竞速：按 penalty 选优</li>
+        </ol>
+
+        <div id="status" class="status" aria-live="polite"></div>
+        <canvas id="chart" width="320" height="110" aria-label="代价曲线"></canvas>
+        <div id="explain" class="explain"></div>
+      </aside>
+    </main>
+
+    <script type="module" src="/src/demo/main.ts"></script>
+  </body>
+</html>

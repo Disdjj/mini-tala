@@ -1,0 +1,289 @@
+:root {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --line: #2a2f3a;
+  --text: #e6e8ee;
+  --muted: #8a93a6;
+  --node: #1f2633;
+  --node-stroke: #5b8def;
+  --edge: #c9d1e3;
+  --focus: #f5b942;
+  --wave: #4fd1c5;
+  --best: #7ee787;
+  --bad: #ff7b72;
+  color-scheme: dark;
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+header {
+  padding: 16px 24px 8px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 22px;
+  letter-spacing: 0.5px;
+}
+
+.subtitle {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.subtitle b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+main {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 360px;
+  gap: 16px;
+  padding: 8px 24px 24px;
+  min-height: 0;
+}
+
+.stage {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  /* 固定高度，SVG 按 viewBox 等比缩放进来，避免大图把页面撑长 */
+  height: calc(100vh - 110px);
+  min-height: 420px;
+}
+
+#canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+}
+
+.controls label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+select,
+button {
+  background: var(--node);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+button:hover,
+select:hover {
+  border-color: var(--node-stroke);
+}
+
+button:focus-visible,
+select:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.buttons button {
+  flex: 1;
+}
+
+.phases {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.phases li {
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  font-size: 13px;
+  color: var(--muted);
+  transition: all 0.2s;
+}
+
+.phases li.active {
+  color: var(--text);
+  border-color: var(--focus);
+  background: rgba(245, 185, 66, 0.08);
+}
+
+.phases li.done {
+  color: var(--best);
+}
+
+.status {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  min-height: 3.6em;
+  line-height: 1.6;
+}
+
+#chart {
+  width: 100%;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.explain {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.65;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+}
+
+.explain code {
+  color: var(--text);
+  font-size: 12px;
+}
+
+/* SVG 元素 */
+.grid-line {
+  stroke: var(--line);
+  stroke-dasharray: 3 5;
+}
+
+.node rect {
+  fill: var(--node);
+  stroke: var(--node-stroke);
+  stroke-width: 1.5;
+  transition: x 0.35s ease, y 0.35s ease;
+}
+
+.node text {
+  fill: var(--text);
+  font-size: 18px;
+  text-anchor: middle;
+  dominant-baseline: central;
+  transition: x 0.35s ease, y 0.35s ease;
+  pointer-events: none;
+}
+
+.node.focus rect {
+  stroke: var(--focus);
+  stroke-width: 2.5;
+}
+
+.edge {
+  fill: none;
+  stroke: var(--edge);
+  stroke-width: 1.6;
+}
+
+.edge.straight {
+  stroke-dasharray: 4 4;
+  opacity: 0.55;
+}
+
+.edge.current {
+  stroke: var(--focus);
+  stroke-width: 2.5;
+}
+
+.wave {
+  fill: var(--wave);
+}
+
+.ovg-edge {
+  stroke: var(--wave);
+  stroke-width: 0.6;
+  opacity: 0.18;
+}
+
+.target {
+  fill: none;
+  stroke: var(--focus);
+  stroke-width: 3;
+  stroke-dasharray: 6 5;
+}
+
+.thumb-label {
+  fill: var(--muted);
+  font-size: 22px;
+  text-anchor: middle;
+}
+
+.thumb-label.best {
+  fill: var(--best);
+  font-weight: 700;
+}
+
+.thumb-frame {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 2;
+}
+
+.thumb-frame.best {
+  stroke: var(--best);
+  stroke-width: 5;
+}
+
+@media (max-width: 860px) {
+  main {
+    grid-template-columns: 1fr;
+  }
+
+  .stage {
+    height: 60vh;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .node rect,
+  .node text,
+  .phases li {
+    transition: none;
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "mini-tala",
+  "version": "0.1.0",
+  "description": "A tiny, readable re-implementation of the core ideas of the TALA diagram layout engine, with an animated walkthrough.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "vite": "8.3.2",
+    "vite-plugin-singlefile": "2.3.3",
+    "vitest": "5.0.3"
+  }
+}
