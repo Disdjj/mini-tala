@@ -1,19 +1,37 @@
 // mini-tala 的核心数据结构。
 // 对照 TALA：d2/d2layouts/d2talalayout/internal/layoutgraph/{graph,node,edge}.go
 
+export type Direction = "right" | "down" | "left" | "up";
+export type ShapeKind = "rect" | "person" | "cylinder";
+
 export interface NodeSpec {
+  /** 全路径 id，例如 "container.queue.producer" */
   id: string;
   label?: string;
+  /** 所在容器的 id；不写表示在最外层 */
+  parent?: string;
   width?: number;
   height?: number;
+  shape?: ShapeKind;
+  /** D2 的 style.multiple：画成叠在一起的几层 */
+  multiple?: boolean;
+  icon?: string;
+  fill?: string;
+  mono?: boolean;
+  /** 只对容器有意义：子节点的布局方向 */
+  direction?: Direction;
 }
 
 export interface EdgeSpec {
   from: string;
   to: string;
+  label?: string;
+  /** D2 的 style.animated：画成流动的虚线 */
+  animated?: boolean;
 }
 
 export interface GraphSpec {
+  direction?: Direction;
   nodes: NodeSpec[];
   edges: EdgeSpec[];
 }
@@ -58,11 +76,11 @@ export interface RoutedEdge {
   cost: number;
 }
 
-export interface LayoutResult {
-  seed: number;
-  cells: Map<string, Cell>;
-  rects: Map<string, Rect>;
-  routes: RoutedEdge[];
-  penalty: number;
-  area: number;
+export interface PlacedLabel {
+  kind: "edge" | "node";
+  /** 边标签：边的下标；节点标签：节点 id */
+  owner: string;
+  text: string;
+  rect: Rect;
+  score: number;
 }

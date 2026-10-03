@@ -8,40 +8,39 @@
   <body>
     <header>
       <h1>mini-tala</h1>
-      <p class="subtitle">TALA 布局算法的极简复刻：<b>网格放置</b> → <b>正交路由</b> → <b>多 seed 选优</b></p>
+      <p class="subtitle">
+        用一张真实的架构图，逐步演示 <a href="https://github.com/d2lang/d2/tree/master/d2layouts/d2talalayout" target="_blank" rel="noopener">TALA</a>
+        布局引擎的核心流水线 · 源码 <a href="https://github.com/Disdjj/mini-tala" target="_blank" rel="noopener">Disdjj/mini-tala</a>
+      </p>
     </header>
 
     <main>
       <section class="stage">
         <svg id="canvas" role="img" aria-label="布局动画"></svg>
+        <div id="compare" class="compare" hidden>
+          <div class="compare-title">对照：真实 TALA（d2 v0.9.0 --layout tala）的输出</div>
+        </div>
       </section>
 
       <aside class="panel">
         <div class="controls">
-          <label>
-            示例
-            <select id="example"></select>
-          </label>
           <div class="buttons">
+            <button id="back" type="button" aria-label="上一帧">◀</button>
             <button id="play" type="button">▶ 播放</button>
-            <button id="step" type="button">下一步</button>
+            <button id="step" type="button" aria-label="下一帧">▶|</button>
             <button id="reset" type="button">重置</button>
           </div>
+          <input id="scrub" type="range" min="0" max="0" value="0" aria-label="进度" />
           <label>
             速度
             <input id="speed" type="range" min="1" max="5" value="3" />
           </label>
+          <p class="hint">空格 播放/暂停 · ← → 单步 · 点击阶段名可跳转</p>
         </div>
 
-        <ol id="phases" class="phases">
-          <li data-phase="place">① 节点放置：温度抖动的局部搜索</li>
-          <li data-phase="route">② 正交路由：可见性图上的 Dijkstra</li>
-          <li data-phase="select">③ 多 seed 竞速：按 penalty 选优</li>
-        </ol>
+        <ol id="phases" class="phases"></ol>
 
         <div id="status" class="status" aria-live="polite"></div>
-        <canvas id="chart" width="320" height="110" aria-label="代价曲线"></canvas>
-        <div id="explain" class="explain"></div>
       </aside>
     </main>
 

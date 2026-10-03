@@ -1,195 +1,316 @@
 import "./style.css";
-import type { GraphSpec } from "../core/types";
-import { nodeRects, CELL_W, CELL_H, MARGIN } from "../core/geometry";
-import { EXAMPLES } from "./examples";
-import { buildTimeline, type Frame, type Timeline } from "./timeline";
-import {
-  clear,
-  drawGrid,
-  drawNodes,
-  drawOvg,
-  drawRoute,
-  drawStraightEdges,
-  drawTarget,
-  drawWave,
-  el,
-  ensureArrowMarker,
-  setViewBox,
-} from "./render";
+import type { NodeSpec, Rect } from "../core/types";
+import type { SeedRun } from "../core/layout";
+import { TASK_QUEUE } from "./scene";
+import { buildTimeline, PHASES, type Frame, type Timeline } from "./timeline";
+import { clear, defs, drawBox, drawContainer, drawLabel, drawNode, drawOvg, drawRoute, drawWave, el } from "./render";
+import { gridToLocal } from "../core/nested";
+import talaSvg from "../../examples/task-queue.tala.svg?raw";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const svg = document.getElementById("canvas") as unknown as SVGSVGElement;
-const exampleSel = $<HTMLSelectElement>("example");
 const playBtn = $<HTMLButtonElement>("play");
 const stepBtn = $<HTMLButtonElement>("step");
+const backBtn = $<HTMLButtonElement>("back");
 const resetBtn = $<HTMLButtonElement>("reset");
 const speed = $<HTMLInputElement>("speed");
+const scrub = $<HTMLInputElement>("scrub");
 const statusEl = $<HTMLDivElement>("status");
-const explainEl = $<HTMLDivElement>("explain");
-const chart = $<HTMLCanvasElement>("chart");
+const phasesEl = $<HTMLOListElement>("phases");
+const compareEl = $<HTMLDivElement>("compare");
 
-const EXPLAIN: Record<Frame["kind"], string> = {
-  place: `每一轮把节点<b>随机打乱</b>后逐个移动：目标点 = 邻居坐标<b>中位数</b> + <b>温度抖动</b>（虚线十字），
-    再在目标点附近找代价最低的空格。温度从 <code>2√N</code> 几何衰减到 0.2，最后做几轮纯贪心收尾。
-    代价 = 距离 + 对角拐弯罚 + 遮挡罚 + 逆向（向上/向左）罚。<br/>对照 <code>placement/node_placement.go</code>`,
-  route: `先在节点之间建<b>正交可见性图</b>（淡青色细线）：端口坐标和格线做笛卡尔积，只连同一行/列的相邻点。
-    每条边在这张图上跑 <b>Dijkstra</b>（青色波纹是探索顺序），拐弯、交叉、和已有线重叠都要付代价。
-    边按 3 种顺序各路由一遍，取总代价最低的。<br/>对照 <code>routing/ovg.go</code>、<code>ovg_edge_router.go</code>`,
-  select: `同一张图用 seed <b>1、2、3</b> 各跑一遍完整流水线，按
-    <code>penalty = 0.5×拐点 + 3×斜线 + 交叉数</code> 打分，<b>越低越好</b>；平局再比面积。
-    这就是 TALA 的"多 seed 竞速"。<br/>对照 <code>quality/scoring.go</code>、<code>layout.go</code>`,
-};
+const nodes = new Map<string, NodeSpec>(TASK_QUEUE.nodes.map((n) => [n.id, n]));
+const short = (id: string) => (id === "" ? "最外层" : id.split(".").pop()!);
 
 let timeline!: Timeline;
-let graph!: GraphSpec;
 let index = 0;
 let timer: number | undefined;
 
-function gridSize(cells: Iterable<{ gx: number; gy: number }>): { cols: number; rows: number } {
-  let cols = 1;
-  let rows = 1;
-  for (const c of cells) {
-    cols = Math.max(cols, c.gx + 1);
-    rows = Math.max(rows, c.gy + 1);
-  }
-  return { cols, rows };
+PHASES.forEach((p) => {
+  const li = document.createElement("li");
+  li.dataset.phase = p.key;
+  li.textContent = p.title;
+  li.addEventListener("click", () => {
+    stop();
+    index = timeline.frames.findIndex((f) => f.phase === p.key);
+    render();
+  });
+  phasesEl.appendChild(li);
+});
+
+function setView(run: SeedRun): void {
+  svg.setAttribute("viewBox", `0 0 ${run.width} ${run.height}`);
 }
 
-function renderPlace(f: Extract<Frame, { kind: "place" }>): void {
-  const { cols, rows } = gridSize(f.frame.cells.values());
-  // 抖动目标点可能落在当前网格外，视野要把它也包进来
-  const t = f.frame.focus?.target;
-  const viewCols = Math.max(cols, 3, t ? Math.ceil(t.x + 1) : 0);
-  const viewRows = Math.max(rows, 3, t ? Math.ceil(t.y + 1) : 0);
-  setViewBox(svg, viewCols, viewRows);
-  drawGrid(svg, viewCols, viewRows);
-  const rects = nodeRects(graph, f.frame.cells);
-  drawStraightEdges(svg, graph, rects);
-  drawNodes(svg, graph, rects, f.frame.focus?.nodeId);
-  if (t && t.x >= -0.5 && t.y >= -0.5) drawTarget(svg, t);
-  statusEl.innerHTML =
-    `seed <b>${f.seed}</b> · 迭代 ${f.frame.iteration}/${f.total - 1}<br/>` +
-    `温度 ${f.frame.temperature.toFixed(2)} · 放置代价 <b>${f.frame.cost.toFixed(2)}</b><br/>` +
-    `<span style="color:var(--muted)">${f.frame.note}</span>`;
-}
-
-function renderRoute(f: Extract<Frame, { kind: "route" }>): void {
-  const best = timeline.best;
-  const { cols, rows } = gridSize(best.result.cells.values());
-  setViewBox(svg, cols, rows);
-  ensureArrowMarker(svg);
-  drawOvg(svg, best.routing.ovg);
+/** 按容器深度从外到内画：先容器（大框在下面），再叶子 */
+function drawScene(
+  run: SeedRun,
+  rects: Map<string, Rect>,
+  opts: { only?: Set<string>; focusNode?: string; focusContainer?: string; ghost?: Set<string> } = {},
+): SVGGElement {
+  const h = run.tree.hierarchy;
   const layer = el("g", {}, svg);
-  for (const pts of f.done) drawRoute(layer, pts);
+  const depth = (id: string) => h.ancestors(id).length;
+  const ids = [...nodes.keys()].filter((id) => rects.has(id) && (!opts.only || opts.only.has(id)));
+  for (const id of ids.filter((x) => h.isContainer(x)).sort((a, b) => depth(a) - depth(b))) {
+    drawContainer(layer, nodes.get(id)!, rects.get(id)!, { focus: id === opts.focusContainer });
+  }
+  for (const id of ids.filter((x) => !h.isContainer(x))) {
+    drawNode(layer, nodes.get(id)!, rects.get(id)!, { focus: id === opts.focusNode, ghost: opts.ghost?.has(id) });
+  }
+  return layer;
+}
+
+function drawFinalEdges(run: SeedRun, parent: Element): void {
+  for (const r of run.routes) drawRoute(parent, r.points, { animated: TASK_QUEUE.edges[r.edgeIndex].animated });
+}
+
+function drawFinalLabels(run: SeedRun, parent: Element, upto = Infinity): void {
+  run.labels.slice(0, upto).forEach((l) => drawLabel(parent, l.rect, l.text));
+}
+
+// ---------- 各阶段 ----------
+
+function renderStructure(f: Extract<Frame, { phase: "structure" }>, run: SeedRun): void {
+  setView(run);
+  const final = drawScene(run, run.rects);
+  final.setAttribute("opacity", "0.35");
+  const h = run.tree.hierarchy;
+  if (f.step === "tree") {
+    // 容器从内到外依次描边
+    const order = h.bottomUp.filter((id) => id !== "");
+    order.forEach((id, i) => {
+      const r = run.rects.get(id)!;
+      el("rect", { x: r.x - 6, y: r.y - 6, width: r.w + 12, height: r.h + 12, class: "level-ring", style: `animation-delay:${i * 0.4}s` }, svg);
+      const t = el("text", { x: r.x + 12, y: r.y + r.h - 16, class: "level-tag" }, svg);
+      t.textContent = `第 ${i + 1} 个排：${short(id)}`;
+    });
+  } else {
+    for (const c of run.tree.clusters) {
+      const rs = c.members.map((m) => run.rects.get(m)!);
+      const x = Math.min(...rs.map((r) => r.x)) - 18;
+      const y = Math.min(...rs.map((r) => r.y)) - 18;
+      const w = Math.max(...rs.map((r) => r.x + r.w)) - x + 18;
+      const hh = Math.max(...rs.map((r) => r.y + r.h)) - y + 18;
+      el("rect", { x, y, width: w, height: hh, rx: 16, class: "cluster-ring" }, svg);
+      const t = el("text", { x: x + w / 2, y: y - 14, class: "cluster-tag" }, svg);
+      t.textContent = "簇 ×4";
+    }
+  }
+}
+
+/**
+ * 放置阶段：当前层的每个物件按"这一帧的格子"换算成真实尺寸的像素位置画出来，
+ * 已经排好的内层容器作为一个整体跟着移动（这正是自底向上递归的含义）。
+ */
+function renderPlace(f: Extract<Frame, { phase: "place" }>, run: SeedRun): void {
+  const lv = run.tree.levels[f.levelIndex];
+  const h = run.tree.hierarchy;
+  const sizes = new Map<string, { w: number; h: number }>();
+  for (const id of lv.problem.items) sizes.set(id, { w: lv.local.get(id)!.w, h: lv.local.get(id)!.h });
+  const { local, contentW, contentH } = gridToLocal(f.frame.cells, sizes);
+
+  // 这一层的内容区放在画布中央
+  const W = Math.max(run.width, contentW + 200);
+  const H = Math.max(run.height, contentH + 200);
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  const ox = (W - contentW) / 2;
+  const oy = (H - contentH) / 2;
+
+  // 格线：按这一帧每行/列的实际位置画
+  const g = el("g", {}, svg);
+  const xs = new Set<number>();
+  const ys = new Set<number>();
+  for (const r of local.values()) {
+    xs.add(r.x + r.w / 2);
+    ys.add(r.y + r.h / 2);
+  }
+  for (const x of xs) el("line", { x1: ox + x, y1: oy - 60, x2: ox + x, y2: oy + contentH + 60, class: "grid-line" }, g);
+  for (const y of ys) el("line", { x1: ox - 60, y1: oy + y, x2: ox + contentW + 60, y2: oy + y, class: "grid-line" }, g);
+
+  const abs = (id: string) => {
+    const r = local.get(id)!;
+    return { x: ox + r.x, y: oy + r.y, w: r.w, h: r.h };
+  };
+  for (const e of lv.problem.edges) {
+    const a = abs(e.from);
+    const b = abs(e.to);
+    el("line", { x1: a.x + a.w / 2, y1: a.y + a.h / 2, x2: b.x + b.w / 2, y2: b.y + b.h / 2, class: "straight" }, g);
+  }
+
+  for (const id of lv.problem.items) {
+    const r = abs(id);
+    const focus = f.frame.focus?.item === id;
+    const cluster = lv.clusters.find((c) => c.id === id);
+    if (h.isContainer(id)) {
+      // 已经排好的内层容器：整体平移它在内层的布局
+      const inner = run.tree.levels.find((l) => l.level === id)!;
+      const shifted = new Map<string, Rect>();
+      const base = run.placedRects.get(id)!;
+      const dx = r.x - base.x;
+      const dy = r.y - base.y;
+      const collect = (lvl: string) => {
+        for (const child of h.children.get(lvl) ?? []) {
+          const cr = run.placedRects.get(child)!;
+          shifted.set(child, { ...cr, x: cr.x + dx, y: cr.y + dy });
+          if (h.isContainer(child)) collect(child);
+        }
+      };
+      shifted.set(id, { ...base, x: r.x, y: r.y });
+      collect(id);
+      drawScene(run, shifted, { only: new Set(shifted.keys()), focusContainer: focus ? id : undefined });
+      void inner;
+    } else if (cluster) {
+      // 簇：一个合成节点，内部成员竖排
+      el("rect", { x: r.x - 10, y: r.y - 10, width: r.w + 20, height: r.h + 20, rx: 14, class: focus ? "cluster-ring" : "cluster-box" }, g);
+      cluster.members.forEach((m, i) => {
+        const n = nodes.get(m)!;
+        const mh = n.height ?? 80;
+        drawNode(g, n, { x: r.x, y: r.y + i * (mh + 60), w: n.width ?? r.w, h: mh });
+      });
+    } else {
+      drawNode(g, nodes.get(id)!, r, { focus });
+    }
+  }
+
+  if (f.frame.focus) {
+    // 抖动目标点：在网格坐标上插值到像素
+    const t = f.frame.focus.target;
+    const colXs = [...xs].sort((a, b) => a - b);
+    const rowYs = [...ys].sort((a, b) => a - b);
+    const lerp = (arr: number[], v: number) => {
+      if (arr.length === 1) return arr[0];
+      const i = Math.max(0, Math.min(arr.length - 2, Math.floor(v)));
+      return arr[i] + (arr[i + 1] - arr[i]) * (v - i);
+    };
+    const x = ox + lerp(colXs, t.x);
+    const y = oy + lerp(rowYs, t.y);
+    el("circle", { cx: x, cy: y, r: 30, class: "target" }, g);
+    el("line", { x1: x - 48, y1: y, x2: x + 48, y2: y, class: "target" }, g);
+    el("line", { x1: x, y1: y - 48, x2: x, y2: y + 48, class: "target" }, g);
+  }
+  statusEl.innerHTML =
+    `${f.note}<br/><span class="muted">迭代 ${f.frame.iteration}/${f.frame.totalIterations} · 温度 ${f.frame.temperature.toFixed(2)} · ` +
+    `本层代价 <b>${f.frame.cost.toFixed(2)}</b></span>`;
+}
+
+function renderAlign(f: Extract<Frame, { phase: "align" }>, run: SeedRun): void {
+  setView(run);
+  drawScene(run, f.rects, { focusNode: f.moved });
+  // 用中心连线示意每条边是否已经是直线
+  for (const e of TASK_QUEUE.edges) {
+    const a = f.rects.get(e.from)!;
+    const b = f.rects.get(e.to)!;
+    const ax = a.x + a.w / 2, ay = a.y + a.h / 2, bx = b.x + b.w / 2, by = b.y + b.h / 2;
+    const straight = Math.abs(ax - bx) < 1 || Math.abs(ay - by) < 1;
+    el("line", { x1: ax, y1: ay, x2: bx, y2: by, class: straight ? "straight ok" : "straight bad" }, svg);
+  }
+  statusEl.innerHTML = f.note;
+}
+
+function renderRoute(f: Extract<Frame, { phase: "route" }>, run: SeedRun): void {
+  setView(run);
+  drawScene(run, run.rects);
+  if (f.showOvg) drawOvg(svg, run.routing.ovg);
+  const layer = el("g", {}, svg);
+  if (f.forked) {
+    drawFinalEdges(run, layer);
+    const fk = run.forks[0];
+    if (fk) el("circle", { cx: fk.junction.x, cy: fk.junction.y, r: 14, class: "junction" }, svg);
+  } else {
+    for (const pts of f.done) drawRoute(layer, pts);
+  }
   if (f.current) {
     drawWave(svg, f.current.visited, f.current.upto);
-    if (f.current.points) drawRoute(svg, f.current.points, true);
+    if (f.current.points) drawRoute(svg, f.current.points, { hot: true });
   }
-  drawNodes(svg, graph, best.result.rects);
-  const r = best.routing;
+  const a = run.routing.attempts.map((x) => `${x.flavor}: ${x.totalCost.toFixed(0)}`).join(" · ");
+  statusEl.innerHTML = `${f.note}<br/><span class="muted">3 种边顺序的总代价：${a}</span>`;
+}
+
+function renderLabel(f: Extract<Frame, { phase: "label" }>, run: SeedRun): void {
+  setView(run);
+  drawScene(run, run.rects);
+  const layer = el("g", {}, svg);
+  drawFinalEdges(run, layer);
+  drawFinalLabels(run, layer, f.upto);
+  if (f.trying) {
+    const max = Math.max(...f.trying.map((t) => t.score), 1);
+    for (const t of f.trying) {
+      drawBox(svg, t.rect, t.score === 0 ? "cand good" : t.score / max > 0.3 ? "cand bad" : "cand mid");
+    }
+  }
+  statusEl.innerHTML = f.note;
+}
+
+function renderSelect(f: Extract<Frame, { phase: "select" }>): void {
+  const runs = timeline.runs;
+  const w = Math.max(...runs.map((r) => r.width));
+  const h = Math.max(...runs.map((r) => r.height)) + 120;
+  svg.setAttribute("viewBox", `0 0 ${w * runs.length} ${h}`);
+  defs(svg);
+  runs.forEach((run, i) => {
+    const isBest = run.seed === timeline.best.seed;
+    const g = el("g", { transform: `translate(${i * w}, 0)` }, svg);
+    el("rect", { x: 20, y: 20, width: w - 40, height: h - 40, rx: 30, class: isBest ? "thumb best" : "thumb" }, g);
+    const inner = el("g", {}, g);
+    for (const id of run.tree.hierarchy.bottomUp.filter((x) => x !== "").reverse()) drawContainer(inner, nodes.get(id)!, run.rects.get(id)!);
+    for (const n of TASK_QUEUE.nodes) if (!run.tree.hierarchy.isContainer(n.id)) drawNode(inner, n, run.rects.get(n.id)!);
+    drawFinalEdges(run, inner);
+    drawFinalLabels(run, inner);
+    const t = el("text", { x: w / 2, y: h - 50, class: isBest ? "thumb-label best" : "thumb-label" }, g);
+    t.textContent = `seed ${run.seed} · penalty ${run.penalty.toFixed(2)}${isBest ? "  ✓ 胜出" : ""}`;
+  });
   statusEl.innerHTML =
-    `seed <b>${f.seed}</b> · 顺序 <b>${r.best.flavor}</b> 胜出<br/>` +
-    (f.current
-      ? `${f.current.label} · 已探索 ${f.current.upto} 个点`
-      : `全部 ${f.done.length} 条边路由完成`) +
-    `<br/><span style="color:var(--muted)">${r.attempts
-      .map((a) => `${a.flavor}: ${a.totalCost.toFixed(0)}`)
-      .join(" · ")}</span>`;
+    f.note +
+    "<br/>" +
+    runs.map((r) => `seed ${r.seed}：penalty <b>${r.penalty.toFixed(2)}</b>${r.seed === timeline.best.seed ? " ✓" : ""}`).join(" · ");
 }
 
-function renderSelect(f: Extract<Frame, { kind: "select" }>): void {
-  // 三个 seed 的最终结果并排画在一张大画布上
-  const sizes = f.runs.map((r) => gridSize(r.result.cells.values()));
-  const panelW = Math.max(...sizes.map((s) => 2 * MARGIN + s.cols * CELL_W));
-  const panelH = Math.max(...sizes.map((s) => 2 * MARGIN + s.rows * CELL_H)) + 60;
-  svg.setAttribute("viewBox", `0 0 ${panelW * f.runs.length} ${panelH}`);
-  ensureArrowMarker(svg);
-  f.runs.forEach((run, i) => {
-    const isBest = run.result.seed === f.bestSeed;
-    const g = el("g", { transform: `translate(${i * panelW}, 0)` }, svg);
-    el("rect", { x: 8, y: 8, width: panelW - 16, height: panelH - 16, rx: 14, class: isBest ? "thumb-frame best" : "thumb-frame" }, g);
-    for (const route of run.result.routes) drawRoute(g, route.points);
-    drawNodes(g, graph, run.result.rects);
-    const t = el("text", { x: panelW / 2, y: panelH - 22, class: isBest ? "thumb-label best" : "thumb-label" }, g);
-    t.textContent = `seed ${run.result.seed} · penalty ${run.result.penalty.toFixed(1)}${isBest ? " ✓ 胜出" : ""}`;
-  });
-  statusEl.innerHTML = f.runs
-    .map((r) => {
-      const mark = r.result.seed === f.bestSeed ? " ✓" : "";
-      return `seed ${r.result.seed}：penalty <b>${r.result.penalty.toFixed(1)}</b>，面积 ${(r.result.area / 1000).toFixed(0)}k${mark}`;
-    })
-    .join("<br/>");
-}
-
-function updatePhases(kind: Frame["kind"]): void {
-  const order: Frame["kind"][] = ["place", "route", "select"];
-  const cur = order.indexOf(kind);
-  document.querySelectorAll<HTMLLIElement>("#phases li").forEach((li) => {
-    const i = order.indexOf(li.dataset.phase as Frame["kind"]);
-    li.classList.toggle("active", i === cur);
-    li.classList.toggle("done", i < cur);
-  });
-  explainEl.innerHTML = EXPLAIN[kind];
-}
-
-/** 代价曲线：放置阶段每轮的总代价，当前帧位置用竖线标出 */
-function drawChart(): void {
-  const ctx = chart.getContext("2d");
-  if (!ctx) return;
-  const dpr = window.devicePixelRatio || 1;
-  const w = chart.clientWidth || 320;
-  const h = 110;
-  chart.width = w * dpr;
-  chart.height = h * dpr;
-  ctx.scale(dpr, dpr);
-  ctx.clearRect(0, 0, w, h);
-
-  const costs = timeline.best.frames.map((f) => f.cost);
-  const max = Math.max(...costs);
-  const min = Math.min(...costs);
-  const pad = 10;
-  const x = (i: number) => pad + ((w - 2 * pad) * i) / Math.max(1, costs.length - 1);
-  const y = (c: number) => h - pad - ((h - 2 * pad) * (c - min)) / Math.max(1e-9, max - min);
-
-  ctx.strokeStyle = "#5b8def";
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  costs.forEach((c, i) => (i ? ctx.lineTo(x(i), y(c)) : ctx.moveTo(x(i), y(c))));
-  ctx.stroke();
-
-  ctx.fillStyle = "#8a93a6";
-  ctx.font = "11px sans-serif";
-  ctx.fillText(`放置代价 ${max.toFixed(1)} → ${costs[costs.length - 1].toFixed(1)}`, w - pad - 140, 14);
-
-  const f = timeline.frames[index];
-  if (f?.kind === "place") {
-    const i = timeline.best.frames.indexOf(f.frame);
-    ctx.strokeStyle = "#f5b942";
-    ctx.beginPath();
-    ctx.moveTo(x(i), pad);
-    ctx.lineTo(x(i), h - pad);
-    ctx.stroke();
-  }
-}
+// ---------- 主渲染与播放控制 ----------
 
 function render(): void {
   const f = timeline.frames[index];
+  const run = timeline.best;
   clear(svg);
-  if (f.kind === "place") renderPlace(f);
-  else if (f.kind === "route") renderRoute(f);
-  else renderSelect(f);
-  updatePhases(f.kind);
-  drawChart();
+  if (f.phase !== "select") defs(svg);
+  switch (f.phase) {
+    case "structure":
+      renderStructure(f, run);
+      statusEl.innerHTML = f.note;
+      break;
+    case "place":
+      renderPlace(f, run);
+      break;
+    case "align":
+      renderAlign(f, run);
+      break;
+    case "route":
+      renderRoute(f, run);
+      break;
+    case "label":
+      renderLabel(f, run);
+      break;
+    case "select":
+      renderSelect(f);
+      break;
+  }
+  const cur = PHASES.findIndex((p) => p.key === f.phase);
+  phasesEl.querySelectorAll("li").forEach((li, i) => {
+    li.classList.toggle("active", i === cur);
+    li.classList.toggle("done", i < cur);
+  });
+  scrub.value = String(index);
+  compareEl.hidden = f.phase !== "select";
 }
 
-// ---------- 播放控制 ----------
-
-/** 速度滑块 1..5 → 每帧间隔（ms）。放置阶段帧多，播放得快一些 */
-function interval(kind: Frame["kind"]): number {
-  const base = [0, 420, 260, 150, 80, 35][Number(speed.value)] ?? 150;
-  if (kind === "place") return base;
-  if (kind === "route") return base * 1.4;
-  return base * 4;
+/** 速度滑块 1..5 → 每帧间隔（ms）；不同阶段节奏不同 */
+function interval(f: Frame): number {
+  const base = [0, 600, 380, 220, 120, 50][Number(speed.value)] ?? 220;
+  if (f.phase === "place") return base * 0.6;
+  if (f.phase === "route") return f.current && !f.current.points ? base * 0.5 : base * 2;
+  if (f.phase === "structure" || f.phase === "select") return base * 8;
+  return base * 3;
 }
 
 function stop(): void {
@@ -199,62 +320,50 @@ function stop(): void {
 }
 
 function tick(): void {
-  if (index >= timeline.frames.length - 1) {
-    stop();
-    return;
-  }
+  if (index >= timeline.frames.length - 1) return stop();
   index++;
   render();
-  timer = window.setTimeout(tick, interval(timeline.frames[index].kind));
+  timer = window.setTimeout(tick, interval(timeline.frames[index]));
 }
 
 function play(): void {
-  if (timer !== undefined) {
-    stop();
-    return;
-  }
+  if (timer !== undefined) return stop();
   if (index >= timeline.frames.length - 1) index = 0;
   playBtn.textContent = "⏸ 暂停";
-  timer = window.setTimeout(tick, interval(timeline.frames[index].kind));
+  timer = window.setTimeout(tick, interval(timeline.frames[index]));
 }
 
-function load(i: number): void {
+function go(delta: number): void {
   stop();
-  graph = EXAMPLES[i].graph;
-  timeline = buildTimeline(graph);
-  index = 0;
+  index = Math.max(0, Math.min(timeline.frames.length - 1, index + delta));
   render();
 }
 
-EXAMPLES.forEach((ex, i) => {
-  const opt = document.createElement("option");
-  opt.value = String(i);
-  opt.textContent = ex.name;
-  exampleSel.appendChild(opt);
-});
-
-exampleSel.addEventListener("change", () => load(Number(exampleSel.value)));
 playBtn.addEventListener("click", play);
-stepBtn.addEventListener("click", () => {
-  stop();
-  if (index < timeline.frames.length - 1) {
-    index++;
-    render();
-  }
-});
+stepBtn.addEventListener("click", () => go(1));
+backBtn.addEventListener("click", () => go(-1));
 resetBtn.addEventListener("click", () => {
   stop();
   index = 0;
   render();
 });
+scrub.addEventListener("input", () => {
+  stop();
+  index = Number(scrub.value);
+  render();
+});
 document.addEventListener("keydown", (e) => {
-  if (e.target instanceof HTMLSelectElement || e.target instanceof HTMLInputElement) return;
+  if (e.target instanceof HTMLInputElement) return;
   if (e.key === " ") {
     e.preventDefault();
     play();
-  } else if (e.key === "ArrowRight") {
-    stepBtn.click();
-  }
+  } else if (e.key === "ArrowRight") go(1);
+  else if (e.key === "ArrowLeft") go(-1);
 });
 
-load(0);
+// 真实 TALA 的渲染结果，放在选优阶段旁边对比
+compareEl.innerHTML = talaSvg;
+
+timeline = buildTimeline();
+scrub.max = String(timeline.frames.length - 1);
+render();

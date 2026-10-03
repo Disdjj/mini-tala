@@ -22,6 +22,8 @@ export const CROSSING_COST_PX = 400;
 export const SHARE_COST_PX = 5000;
 export const NON_CENTER_PORT_PX = 25;
 export const PORT_REUSE_PX = 3000;
+/** 同组边共享已有线段时，长度按这个比例计价 */
+export const SHARED_DISCOUNT = 0.5;
 /** 每条边最多记录多少个被探索的点（仅用于动画） */
 const MAX_VISITED_RECORDED = 1500;
 
@@ -29,19 +31,30 @@ const portAxis = (p: Port): 0 | 1 => (p.side === "top" || p.side === "bottom" ? 
 const portKey = (p: Port): string => `${p.nodeId}:${p.side}:${p.index}`;
 const edgeKey = (a: number, b: number): string => (a < b ? `${a}-${b}` : `${b}-${a}`);
 
-/** 已路由边留下的占用信息，影响后续边的代价 */
+/**
+ * 已路由边留下的占用信息，影响后续边的代价。
+ * 每条占用都记下"所属的分组"：同源或同目标的边属于同一组，组内允许共享线段和端口，
+ * 这样 consumer -> worker01..04 会先共用一段主干再分叉（TALA 的 edgeCanOverlapEdges + FixClusterEdgeBranching）。
+ */
 export interface Occupation {
   /** 点 -> 被哪些方向占用（bit0 水平，bit1 竖直） */
   points: Map<number, number>;
-  segments: Set<string>;
-  ports: Set<string>;
+  /** 线段 -> 占用它的分组 */
+  segments: Map<string, Set<string>>;
+  ports: Map<string, Set<string>>;
 }
 
 export const emptyOccupation = (): Occupation => ({
   points: new Map(),
-  segments: new Set(),
-  ports: new Set(),
+  segments: new Map(),
+  ports: new Map(),
 });
+
+/** 一条边可以和哪些分组共享线路：以源节点出发的组 + 以目标节点结束的组 */
+export const shareGroups = (from: string, to: string): string[] => [`out:${from}`, `in:${to}`];
+
+const sharable = (owners: Set<string> | undefined, groups: string[]) =>
+  owners !== undefined && [...owners].every((o) => groups.includes(o));
 
 export interface EdgeSearch {
   route: RoutedEdge;
@@ -70,8 +83,12 @@ export function searchEdge(
   fromId: string,
   toId: string,
 ): EdgeSearch {
-  const portCost = (p: Port) =>
-    (p.isCenter ? 0 : NON_CENTER_PORT_PX) + (occ.ports.has(portKey(p)) ? PORT_REUSE_PX : 0);
+  const groups = shareGroups(fromId, toId);
+  const portCost = (p: Port) => {
+    const owners = occ.ports.get(portKey(p));
+    const reuse = owners && !sharable(owners, groups) ? PORT_REUSE_PX : 0;
+    return (p.isCenter ? 0 : NON_CENTER_PORT_PX) + reuse;
+  };
 
   const dist = new Map<number, number>();
   const prev = new Map<number, number>();
@@ -126,11 +143,16 @@ export function searchEdge(
     for (const e of ovg.adj[s.point]) {
       let step = e.length;
       if (e.axis !== s.axis) step += TURN_COST_PX;
-      if (occ.segments.has(edgeKey(s.point, e.to))) step += SHARE_COST_PX;
-      // 到达的点已被另一方向的线占用 → 视为一次交叉
-      const used = occ.points.get(e.to) ?? 0;
-      const otherAxisBit = e.axis === 0 ? 2 : 1;
-      if (used & otherAxisBit) step += CROSSING_COST_PX;
+      const owners = occ.segments.get(edgeKey(s.point, e.to));
+      if (owners) {
+        // 同组共享：几乎免费（略低于新开一段，鼓励汇合）；不同组：近似禁止
+        step = sharable(owners, groups) ? step * SHARED_DISCOUNT : step + SHARE_COST_PX;
+      } else {
+        // 到达的点已被另一方向的线占用 → 视为一次交叉
+        const used = occ.points.get(e.to) ?? 0;
+        const otherAxisBit = e.axis === 0 ? 2 : 1;
+        if (used & otherAxisBit) step += CROSSING_COST_PX;
+      }
 
       const ns: State = { point: e.to, axis: e.axis };
       const nid = stateId(ns);
@@ -189,13 +211,18 @@ export function simplify(points: Point[]): Point[] {
 }
 
 /** 把一条路由写进占用表，后面的边会为交叉 / 共线 / 复用端口付出代价 */
-function occupy(ovg: Ovg, occ: Occupation, points: Point[], fromPorts: Port[], toPorts: Port[]): void {
+function occupy(ovg: Ovg, occ: Occupation, points: Point[], fromPorts: Port[], toPorts: Port[], group: string[]): void {
+  const mark = <K>(m: Map<K, Set<string>>, k: K) => {
+    const set = m.get(k) ?? new Set<string>();
+    for (const g of group) set.add(g);
+    m.set(k, set);
+  };
   // 记录真正用到的首尾端口
   const first = points[0];
   const last = points[points.length - 1];
   for (const p of [...fromPorts, ...toPorts]) {
     if ((p.at.x === first.x && p.at.y === first.y) || (p.at.x === last.x && p.at.y === last.y)) {
-      occ.ports.add(portKey(p));
+      mark(occ.ports, portKey(p));
     }
   }
   // 沿每条线段把途经的 OVG 点和相邻点对标记为占用
@@ -214,7 +241,7 @@ function occupy(ovg: Ovg, occ: Occupation, points: Point[], fromPorts: Port[], t
     onSeg.sort((u, v) => (axis === 0 ? ovg.points[u].x - ovg.points[v].x : ovg.points[u].y - ovg.points[v].y));
     for (let k = 0; k < onSeg.length; k++) {
       occ.points.set(onSeg[k], (occ.points.get(onSeg[k]) ?? 0) | (axis === 0 ? 1 : 2));
-      if (k + 1 < onSeg.length) occ.segments.add(edgeKey(onSeg[k], onSeg[k + 1]));
+      if (k + 1 < onSeg.length) mark(occ.segments, edgeKey(onSeg[k], onSeg[k + 1]));
     }
   }
 }
@@ -246,17 +273,18 @@ function manhattanBetween(a: Rect, b: Rect): number {
 export function routeAll(
   edges: { from: string; to: string }[],
   rects: Map<string, Rect>,
-  cols: number,
-  rows: number,
+  leaves: Set<string>,
+  bounds: Rect,
 ): RoutingResult {
   const portsByNode = new Map<string, Port[]>();
-  for (const [id, r] of rects) portsByNode.set(id, portsOf(id, r));
+  for (const id of leaves) portsByNode.set(id, portsOf(id, rects.get(id)!));
   const allPorts = [...portsByNode.values()].flat();
-  const ovg = buildOvg([...rects.values()], allPorts, cols, rows);
+  const obstacles = [...leaves].map((id) => rects.get(id)!);
+  const ovg = buildOvg(obstacles, allPorts, bounds);
 
   const routable = edges
     .map((e, i) => ({ ...e, i }))
-    .filter((e) => e.from !== e.to && rects.has(e.from) && rects.has(e.to));
+    .filter((e) => e.from !== e.to && leaves.has(e.from) && leaves.has(e.to));
   const len = (e: { from: string; to: string }) => manhattanBetween(rects.get(e.from)!, rects.get(e.to)!);
 
   const attempts: RoutingAttempt[] = FLAVORS.map((flavor) => {
@@ -273,7 +301,7 @@ export function routeAll(
       const s = searchEdge(ovg, fp, tp, occ, e.i, e.from, e.to);
       searches.push(s);
       totalCost += s.ok ? s.route.cost : SHARE_COST_PX * 10;
-      if (s.ok) occupy(ovg, occ, s.route.points, fp, tp);
+      if (s.ok) occupy(ovg, occ, s.route.points, fp, tp, shareGroups(e.from, e.to));
     }
     return { flavor, order: ordered.map((e) => e.i), searches, totalCost };
   });

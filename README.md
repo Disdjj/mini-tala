@@ -2,10 +2,10 @@
 
 [TALA](https://github.com/d2lang/d2/tree/master/d2layouts/d2talalayout)（D2 的布局引擎）的**极简复刻**，用于学习它的核心思路，并附带一个浏览器动画演示。
 
-真正的 TALA 有约 6.4 万行 Go、38 个流水线阶段，并且会识别树、层级、簇、序列等结构。mini-tala 只保留其中最核心的三段，算法核心约 1000 行 TypeScript：
+真正的 TALA 有约 6.4 万行 Go、38 个流水线阶段。mini-tala 只保留其中最能体现思路的 6 个阶段，算法核心约 1900 行 TypeScript：
 
 ```
-① 节点放置  →  ② 正交路由  →  ③ 多 seed 竞速
+① 结构识别 → ② 逐层放置 → ③ 轴对齐 → ④ 正交路由 → ⑤ 标签放置 → ⑥ 多 seed 竞速
 ```
 
 ## 动画演示
@@ -22,62 +22,36 @@ npm run build    # 打包成单文件 dist/index.html，双击即可打开
 
 演示会依次播放：
 
-1. **放置**：节点在网格上跳动。虚线十字是“邻居中位数 + 温度抖动”算出的目标点，右侧曲线是放置代价的收敛过程。
-2. **路由**：淡青色细线是正交可见性图，青色波纹是 Dijkstra 的探索顺序，橙色线是刚找到的路线。
-3. **选优**：seed 1、2、3 的最终结果并排显示，`penalty` 最低的方案胜出。
+1. **结构识别**：先描出容器树（Queue Library 先排，Application 后排），再把 4 个 worker 圈成一个簇。
+2. **逐层放置**：一层一层地看节点在网格上跳动。已经排好的内层容器作为整体跟着移动；虚线十字是“邻居中位数 + 温度抖动”算出的目标点。
+3. **轴对齐**：中心连线从红色（歪）逐条变成绿色（直）。
+4. **路由**：淡青色细线是可见性图，青色波纹是 Dijkstra 的探索顺序；最后 worker 的 4 条边合并成一个分叉。
+5. **标签**：每个标签的候选位置用红、黄、绿框显示得分。
+6. **选优**：seed 1、2、3 的结果并排显示，旁边是真实 TALA 的输出。
 
-键盘：`空格` 播放或暂停，`→` 单步前进。
+键盘：`空格` 播放或暂停，`← →` 单步；拖动进度条或点击阶段名可以直接跳转。
 
-## 三段算法
+## 演示场景
 
-### ① 节点放置：网格上的温度抖动局部搜索（`src/core/placement.ts`）
+只用一张图：[`examples/task-queue.d2`](examples/task-queue.d2)。它是一个任务队列架构，包含 3 层嵌套容器、14 个节点、12 条边和 10 个边标签。真实 TALA 对这张图的输出存在 [`examples/task-queue.tala.svg`](examples/task-queue.tala.svg)，演示最后一步会把两者并排对比。
 
-TALA 源码注释说这一段 *“heavily based on Graph Compact Orthogonal Layout by Freivalds and Glagolevs”*。
+## 流水线
 
-- **初始化**：按 BFS 序逐个放置，每个节点放到已放邻居坐标中位数附近、代价最低的空格上。
-- **迭代**：`90·√N` 轮，温度从 `2·√N` 几何衰减到 `0.2`。每一轮：
-  1. 随机打乱节点顺序；
-  2. 目标点 = 邻居坐标**中位数** + `U(-temp, temp)` 的随机抖动；
-  3. 在目标点附近的菱形区域里，移到代价最低的空格。**即使比当前位置差也照样移动**，算法靠这一点跳出局部最优；
-  4. 每 9 轮压缩一次，删掉空行和空列。
-- **收尾**：温度设为 0，做几轮纯贪心，只接受严格变好的移动。
+| 阶段 | 文件 | 做什么 | 对照 TALA 源码 |
+|---|---|---|---|
+| ① 结构识别 | `hierarchy.ts`、`clusters.ts` | 建立容器树；邻居完全相同的兄弟节点（worker01..04）折叠成一个簇 | `layoutgraph`、`grouping/clusters.go` |
+| ② 逐层放置 | `nested.ts`、`placement.ts`、`cost.ts` | 自底向上：每个容器内部做网格上的温度抖动局部搜索，排好后整体当成一个盒子交给上一层 | `placement/node_placement.go`、`placementcost/edge_length.go` |
+| ③ 轴对齐 | `align.ts` | 把相连节点平移到同一条中心线上，让边变直 | `placement/alignment.go` |
+| ④ 正交路由 | `ovg.ts`、`router.ts`、`fork.ts` | 正交可见性图上跑 Dijkstra，按 3 种边顺序取最优；一对多的簇边改成“主干 + 分叉” | `routing/ovg.go`、`ovg_edge_router.go`、`postprocess.go` |
+| ⑤ 标签放置 | `labels.ts` | 候选位置打分，依次放置，已放的标签成为后续标签的障碍 | `labeling/placement.go` |
+| ⑥ 多 seed 竞速 | `layout.ts` | seed 1、2、3 各跑一遍，`penalty = 0.5×拐点 + 3×斜线 + 交叉 + (1−labelScore)` 最低的胜出 | `quality/scoring.go`、`layout.go` |
 
-代价函数（`src/core/cost.ts`）保留了 TALA 的四个核心项：
+### 几个关键点
 
-| 项 | 含义 |
-|---|---|
-| 距离 | 边两端的欧氏距离 |
-| 对角罚 | 两端不在同一行或同一列时必须拐弯，加 `TURN_COST` |
-| 遮挡罚 | 同一行或列但中间夹着其他节点时，加 `2 × TURN_COST` |
-| 方向罚 | 默认偏好“向下 / 向右”，逆向的边按偏离量乘以 0.3 加罚 |
-
-### ② 正交路由：可见性图 + Dijkstra（`src/core/ovg.ts`、`src/core/router.ts`）
-
-- **端口**：每个节点每条边上 3 个，分别在 25%、50%、75% 处，中间端口最便宜。
-- **OVG**：所有端口坐标与网格线坐标做笛卡尔积，去掉落在节点内部的点，然后只把同一行、同一列上的相邻点连起来。在这张图上走出的路径天然就是正交的。
-- **Dijkstra**：搜索状态是 `(点, 到达方向)`，这样拐弯可以单独计价。每一步代价 = 线段长度 + 拐弯 + 交叉 + 与已有线重叠。
-- **边的顺序**：按“短边优先”“长边优先”“声明顺序”各贪心路由一遍，每条边只路由一次，不做拆线重布（rip-up），最后取总代价最低的顺序。
-
-### ③ 多 seed 竞速（`src/core/layout.ts`）
-
-```
-penalty = Σ边 (0.5 × 拐点数 + 3 × 斜线段数) + 交叉数
-```
-
-默认用 seed `1, 2, 3` 各跑一遍完整流程。先比 `penalty`，相同再比面积，仍然相同时取后面的 seed。全程使用确定性随机数，同一个 seed 永远得到同一张图。
-
-## 和真正的 TALA 对照
-
-| mini-tala | TALA 源码（`d2/d2layouts/d2talalayout/`） | 省略了什么 |
-|---|---|---|
-| `placement.ts` | `internal/placement/node_placement.go`、`sizeless_optimizer.go` | 带尺寸的第二阶段、stress 初始化（偶数 seed）、交换与旋转、hub 处理 |
-| `cost.ts` | `internal/placementcost/edge_length.go` | 簇排列、near、herd、对称奖励、flow continuity 等十几项 |
-| `ovg.ts` | `internal/routing/ovg.go` | 隧道、外围多层边界点、树边中点 |
-| `router.ts` | `internal/routing/ovg_edge_router.go`、`coordinator.go` | slingshot 快速路径、簇共享端口、箭头标签避让 |
-| `layout.ts` | `internal/quality/scoring.go`、`layout.go` | 标签放置评分 `(1 − labelScore)` |
-| — | `internal/hierarchy/` | 完整的 Sugiyama：network simplex 分层、sifting、Brandes–Köpf |
-| — | `internal/trees/`、`internal/grouping/` | 树、簇、序列的识别与折叠 |
-| — | 路由后处理 10 余个阶段、`internal/labeling/` | 端口交换、线段均衡、通道分离、标签放置 |
+- **边上提（edge abduction）**：排 Application 这一层时，`user01 → task01` 这条边被看作“task01 和外界相连”。task01 因此被拉到外圈，才能和容器外的 user 对上。
+- **方位提示**：排最外层时，Application 已经排好了。`user02 → task02` 会读出 task02 位于容器顶部，于是把 user02 拉到上方，而不是随便放到左边。
+- **方向继承**：Queue Library 自己没写 `direction`，沿祖先链继承到 `right`，所以 producer → ring buffer → consumer 排成一行。
+- **簇分叉**：consumer 到 4 个 worker 的边共用一段主干，在汇合线上分叉，标签排在各自支线的高度上。
 
 ## 测试
 
@@ -87,9 +61,9 @@ npm test
 
 测试覆盖以下几点：
 
-- 放置结果不重叠；同一个 seed 结果完全相同；链状图收敛成一条直线；星形图的叶子紧贴中心节点。
-- 路由结果是正交的；不穿过任何节点；首尾落在节点边框上；能绕开中间节点。
-- `penalty` 计分正确，并且确实选出了最低分的 seed。
+- 自底向上的放置顺序；簇识别正确（worker 成簇，task 不成簇）；节点都在自己的容器里；兄弟节点互不重叠。
+- 12 条边全部路由成功；路线正交、不穿过无关节点、没有交叉；consumer → worker 共用主干。
+- 10 个标签全部放好且两两不重叠；`penalty` 计分正确；多 seed 选优结果确定。
 
 ## License
 
